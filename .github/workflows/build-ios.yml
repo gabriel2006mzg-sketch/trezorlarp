@@ -1,5 +1,7 @@
 name: "Build iOS app"
 
+# force re-registration
+
 on:
   workflow_dispatch:
     inputs:

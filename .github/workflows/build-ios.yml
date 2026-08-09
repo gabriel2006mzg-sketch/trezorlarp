@@ -1,0 +1,143 @@
+name: "Build iOS app"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        type: choice
+        options:
+          - simulator
+          - device
+        default: simulator
+        description: Build target. Use 'device' to produce a signed .ipa (requires Apple signing secrets).
+
+jobs:
+  build-ios:
+    name: Build iOS
+    runs-on: macos-15
+    env:
+      EXPO_PUBLIC_ENVIRONMENT: debug
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          lfs: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".nvmrc"
+          cache: yarn
+
+      - name: Enable hardened mode off (yarn v4 workaround)
+        run: echo -e "\nenableHardenedMode: false" >> .yarnrc.yml
+
+      - name: Install dependencies
+        run: yarn install
+
+      - name: Build essentials
+        run: yarn build:essential
+
+      - name: Prebuild iOS project
+        working-directory: suite-native/app
+        run: yarn native:prebuild --platform ios
+
+      - name: Build for simulator
+        if: ${{ github.event.inputs.target != 'device' }}
+        working-directory: suite-native/app/ios
+        run: |
+          xcodebuild \
+            -workspace TrezorSuite.xcworkspace \
+            -scheme TrezorSuite \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ./build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Upload simulator app
+        if: ${{ github.event.inputs.target != 'device' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrezorSuite-simulator
+          path: suite-native/app/ios/build/Build/Products/Debug-iphonesimulator/TrezorSuite.app
+
+      - name: Build for device
+        if: ${{ github.event.inputs.target == 'device' }}
+        working-directory: suite-native/app/ios
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euxo pipefail
+
+          if [ -z "${BUILD_CERTIFICATE_BASE64:-}" ]; then
+            echo "ERROR: device build requires BUILD_CERTIFICATE_BASE64, P12_PASSWORD, BUILD_PROVISION_PROFILE_BASE64, KEYCHAIN_PASSWORD secrets."
+            exit 1
+          fi
+
+          # Create certificate and provisioning profile from secrets
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+          echo "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode > "$PP_PATH"
+
+          # Set up keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Install provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+          xcodebuild \
+            -workspace TrezorSuite.xcworkspace \
+            -scheme TrezorSuite \
+            -configuration Debug \
+            -sdk iphoneos \
+            -derivedDataPath ./build \
+            -allowProvisioningUpdates \
+            -allowProvisioningDeviceRegistration \
+            archive -archivePath $RUNNER_TEMP/TrezorSuite.xcarchive
+
+      - name: Export .ipa
+        if: ${{ github.event.inputs.target == 'device' }}
+        run: |
+          cat > $RUNNER_TEMP/exportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>development</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild \
+            -exportArchive \
+            -archivePath $RUNNER_TEMP/TrezorSuite.xcarchive \
+            -exportOptionsPlist $RUNNER_TEMP/exportOptions.plist \
+            -exportPath $RUNNER_TEMP/ipa
+        working-directory: suite-native/app/ios
+
+      - name: Upload .ipa artifact
+        if: ${{ github.event.inputs.target == 'device' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrezorSuite.ipa
+          path: ${{ runner.temp }}/ipa/TrezorSuite.ipa

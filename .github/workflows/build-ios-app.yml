@@ -19,13 +19,13 @@ jobs:
       EXPO_PUBLIC_ENVIRONMENT: debug
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           lfs: true
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: ".nvmrc"
           cache: yarn
@@ -56,7 +56,7 @@ jobs:
 
       - name: Upload simulator app
         if: ${{ github.event.inputs.target != 'device' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: TrezorSuite-simulator
           path: suite-native/app/ios/build/Build/Products/Debug-iphonesimulator/TrezorSuite.app
@@ -131,7 +131,7 @@ jobs:
 
       - name: Upload ipa artifact
         if: ${{ github.event.inputs.target == 'device' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: TrezorSuite.ipa
           path: ${{ runner.temp }}/ipa/TrezorSuite.ipa
